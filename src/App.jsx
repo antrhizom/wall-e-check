@@ -1,6 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { db } from './firebase';
-import { collection, doc, getDocs, addDoc, updateDoc, deleteDoc, onSnapshot, query, where } from 'firebase/firestore';
+import { db, auth } from './firebase';
+import { collection, doc, getDocs, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
+import { 
+  signInWithEmailAndPassword, 
+  sendSignInLinkToEmail, 
+  isSignInWithEmailLink, 
+  signInWithEmailLink,
+  signOut,
+  onAuthStateChanged
+} from 'firebase/auth';
 
 // ============================================================================
 // DATENSTRUKTUR - Arbeiten und Kompetenzen aus dem Sammelrapport
@@ -248,6 +256,12 @@ const formatDateShort = (date) => {
   });
 };
 
+// E-Mail Link Settings
+const actionCodeSettings = {
+  url: window.location.origin,
+  handleCodeInApp: true,
+};
+
 // ============================================================================
 // UI KOMPONENTEN
 // ============================================================================
@@ -303,7 +317,7 @@ const Button = ({ children, variant = 'primary', size = 'normal', className = ''
   };
   const sizes = { small: 'px-3 py-1.5 text-sm', normal: 'px-5 py-2.5', large: 'px-8 py-4 text-lg' };
   return (
-    <button className={`rounded-xl transition-all duration-200 ${variants[variant]} ${sizes[size]} ${className}`} {...props}>
+    <button className={`rounded-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed ${variants[variant]} ${sizes[size]} ${className}`} {...props}>
       {children}
     </button>
   );
@@ -344,73 +358,132 @@ const LoadingSpinner = () => (
 
 const LoginScreen = ({ onLogin }) => {
   const [mode, setMode] = useState('select');
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
   
-  const handleLogin = async () => {
+  // Check for email link sign-in on mount
+  useEffect(() => {
+    if (isSignInWithEmailLink(auth, window.location.href)) {
+      let emailForSignIn = window.localStorage.getItem('emailForSignIn');
+      if (!emailForSignIn) {
+        emailForSignIn = window.prompt('Bitte gib deine E-Mail-Adresse zur Bestätigung ein:');
+      }
+      if (emailForSignIn) {
+        setLoading(true);
+        signInWithEmailLink(auth, emailForSignIn, window.location.href)
+          .then(async (result) => {
+            window.localStorage.removeItem('emailForSignIn');
+            // Find Berufsbildner by email
+            const snapshot = await getDocs(query(collection(db, 'berufsbildner'), where('email', '==', emailForSignIn)));
+            if (!snapshot.empty) {
+              const bb = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+              onLogin({ type: 'berufsbildner', user: bb });
+            }
+            // Clear URL
+            window.history.replaceState(null, '', window.location.pathname);
+          })
+          .catch((err) => {
+            console.error(err);
+            setError('Anmeldung fehlgeschlagen. Bitte versuche es erneut.');
+            setLoading(false);
+          });
+      }
+    }
+  }, []);
+  
+  const handleAdminLogin = async () => {
     setError('');
     setLoading(true);
     
     try {
-      if (mode === 'admin') {
-        const snapshot = await getDocs(query(collection(db, 'admins'), where('username', '==', username)));
-        if (!snapshot.empty) {
-          const admin = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
-          if (admin.password === password) {
-            onLogin({ type: 'admin', user: admin });
-            return;
-          }
+      // Try Firebase Auth first
+      await signInWithEmailAndPassword(auth, email, password);
+      
+      // Find admin in Firestore
+      const snapshot = await getDocs(query(collection(db, 'admins'), where('email', '==', email)));
+      if (!snapshot.empty) {
+        const admin = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+        onLogin({ type: 'admin', user: admin });
+      } else {
+        setError('Admin-Account nicht gefunden');
+      }
+    } catch (err) {
+      console.error(err);
+      setError('Ungültige Anmeldedaten');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const handleBerufsbildnerLogin = async () => {
+    setError('');
+    setSuccess('');
+    setLoading(true);
+    
+    try {
+      // Check if Berufsbildner exists
+      const snapshot = await getDocs(query(collection(db, 'berufsbildner'), where('email', '==', email)));
+      if (snapshot.empty) {
+        setError('Kein Berufsbildner-Account mit dieser E-Mail gefunden');
+        setLoading(false);
+        return;
+      }
+      
+      // Send sign-in link
+      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
+      window.localStorage.setItem('emailForSignIn', email);
+      setSuccess('✉️ Ein Anmelde-Link wurde an deine E-Mail gesendet. Bitte prüfe dein Postfach!');
+    } catch (err) {
+      console.error(err);
+      setError('Fehler beim Senden des Links. Bitte versuche es erneut.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  const handleLernendLogin = async () => {
+    setError('');
+    setLoading(true);
+    
+    try {
+      // Find Berufsbildner with this code
+      const bbSnapshot = await getDocs(collection(db, 'berufsbildner'));
+      let foundBB = null;
+      bbSnapshot.forEach(doc => {
+        const data = doc.data();
+        if (data.codes?.includes(code.toUpperCase())) {
+          foundBB = { id: doc.id, ...data };
         }
-        setError('Ungültige Anmeldedaten');
-      } else if (mode === 'berufsbildner') {
-        const snapshot = await getDocs(query(collection(db, 'berufsbildner'), where('username', '==', username)));
-        if (!snapshot.empty) {
-          const bb = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
-          if (bb.password === password) {
-            onLogin({ type: 'berufsbildner', user: bb });
-            return;
-          }
-        }
-        setError('Ungültige Anmeldedaten');
-      } else if (mode === 'lernend') {
-        // Suche Berufsbildner mit diesem Code
-        const bbSnapshot = await getDocs(collection(db, 'berufsbildner'));
-        let foundBB = null;
-        bbSnapshot.forEach(doc => {
-          const data = doc.data();
-          if (data.codes?.includes(code.toUpperCase())) {
-            foundBB = { id: doc.id, ...data };
-          }
-        });
+      });
+      
+      if (foundBB) {
+        // Find existing Lernender
+        const lernSnapshot = await getDocs(query(collection(db, 'lernende'), where('code', '==', code.toUpperCase())));
         
-        if (foundBB) {
-          // Suche existierenden Lernenden
-          const lernSnapshot = await getDocs(query(collection(db, 'lernende'), where('code', '==', code.toUpperCase())));
-          
-          if (!lernSnapshot.empty) {
-            const lernender = { id: lernSnapshot.docs[0].id, ...lernSnapshot.docs[0].data() };
-            onLogin({ type: 'lernend', user: lernender });
-          } else if (name.trim()) {
-            // Neuen Lernenden erstellen
-            const newLernender = {
-              name: name.trim(),
-              code: code.toUpperCase(),
-              berufsbildnerId: foundBB.id,
-              lehrjahr: 1,
-              startDatum: new Date().toISOString().split('T')[0]
-            };
-            const docRef = await addDoc(collection(db, 'lernende'), newLernender);
-            onLogin({ type: 'lernend', user: { id: docRef.id, ...newLernender } });
-          } else {
-            setError('Bitte gib deinen Namen ein');
-          }
+        if (!lernSnapshot.empty) {
+          const lernender = { id: lernSnapshot.docs[0].id, ...lernSnapshot.docs[0].data() };
+          onLogin({ type: 'lernend', user: lernender });
+        } else if (name.trim()) {
+          // Create new Lernender
+          const newLernender = {
+            name: name.trim(),
+            code: code.toUpperCase(),
+            berufsbildnerId: foundBB.id,
+            lehrjahr: 1,
+            startDatum: new Date().toISOString().split('T')[0]
+          };
+          const docRef = await addDoc(collection(db, 'lernende'), newLernender);
+          onLogin({ type: 'lernend', user: { id: docRef.id, ...newLernender } });
         } else {
-          setError('Ungültiger Code');
+          setError('Bitte gib deinen Namen ein');
         }
+      } else {
+        setError('Ungültiger Code');
       }
     } catch (err) {
       console.error(err);
@@ -419,6 +492,17 @@ const LoginScreen = ({ onLogin }) => {
       setLoading(false);
     }
   };
+  
+  if (loading && isSignInWithEmailLink(auth, window.location.href)) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-stone-900 via-stone-800 to-stone-900 flex items-center justify-center p-4">
+        <Card className="w-full max-w-md text-center">
+          <LoadingSpinner />
+          <p className="text-stone-300 mt-4">Anmeldung wird abgeschlossen...</p>
+        </Card>
+      </div>
+    );
+  }
   
   return (
     <div className="min-h-screen bg-gradient-to-br from-stone-900 via-stone-800 to-stone-900 flex items-center justify-center p-4">
@@ -432,30 +516,93 @@ const LoginScreen = ({ onLogin }) => {
           <h1 className="text-3xl font-bold text-stone-100 mb-2">MaurerCheck</h1>
           <p className="text-stone-400">Lernplattform für Maurerlehrlinge</p>
         </div>
+        
         {mode === 'select' ? (
           <div className="space-y-4">
-            <Button variant="primary" size="large" className="w-full" onClick={() => setMode('lernend')}>👷 Als Lernender einloggen</Button>
-            <Button variant="secondary" size="large" className="w-full" onClick={() => setMode('berufsbildner')}>👨‍🏫 Als Berufsbildner einloggen</Button>
-            <Button variant="ghost" className="w-full" onClick={() => setMode('admin')}>⚙️ Admin</Button>
+            <Button variant="primary" size="large" className="w-full" onClick={() => setMode('lernend')}>
+              👷 Als Lernender einloggen
+            </Button>
+            <Button variant="secondary" size="large" className="w-full" onClick={() => setMode('berufsbildner')}>
+              👨‍🏫 Als Berufsbildner einloggen
+            </Button>
+            <Button variant="ghost" className="w-full" onClick={() => setMode('admin')}>
+              ⚙️ Admin
+            </Button>
           </div>
         ) : (
           <div className="space-y-4">
-            <button onClick={() => { setMode('select'); setError(''); }} className="text-amber-500 hover:text-amber-400 flex items-center gap-2 mb-4">← Zurück</button>
-            {mode === 'lernend' ? (
+            <button onClick={() => { setMode('select'); setError(''); setSuccess(''); }} className="text-amber-500 hover:text-amber-400 flex items-center gap-2 mb-4">
+              ← Zurück
+            </button>
+            
+            {mode === 'lernend' && (
               <>
-                <Input label="Zugangscode vom Berufsbildner" placeholder="z.B. ABC123" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} />
-                <Input label="Dein Name (nur bei Erstanmeldung)" placeholder="Vor- und Nachname" value={name} onChange={(e) => setName(e.target.value)} />
-              </>
-            ) : (
-              <>
-                <Input label="Benutzername" value={username} onChange={(e) => setUsername(e.target.value)} />
-                <Input label="Passwort" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+                <Input 
+                  label="Zugangscode vom Berufsbildner" 
+                  placeholder="z.B. ABC123" 
+                  value={code} 
+                  onChange={(e) => setCode(e.target.value.toUpperCase())} 
+                />
+                <Input 
+                  label="Dein Name (nur bei Erstanmeldung)" 
+                  placeholder="Vor- und Nachname" 
+                  value={name} 
+                  onChange={(e) => setName(e.target.value)} 
+                />
+                {error && <p className="text-red-400 text-sm">{error}</p>}
+                <Button variant="primary" size="large" className="w-full" onClick={handleLernendLogin} disabled={loading}>
+                  {loading ? 'Laden...' : 'Einloggen'}
+                </Button>
+                <p className="text-stone-500 text-sm text-center">
+                  Du erhältst den Code von deinem Berufsbildner
+                </p>
               </>
             )}
-            {error && <p className="text-red-400 text-sm">{error}</p>}
-            <Button variant="primary" size="large" className="w-full" onClick={handleLogin} disabled={loading}>
-              {loading ? 'Laden...' : 'Einloggen'}
-            </Button>
+            
+            {mode === 'berufsbildner' && (
+              <>
+                <Input 
+                  label="E-Mail-Adresse" 
+                  type="email"
+                  placeholder="name@firma.ch" 
+                  value={email} 
+                  onChange={(e) => setEmail(e.target.value)} 
+                />
+                {error && <p className="text-red-400 text-sm">{error}</p>}
+                {success && (
+                  <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl">
+                    <p className="text-emerald-400 text-sm">{success}</p>
+                  </div>
+                )}
+                <Button variant="primary" size="large" className="w-full" onClick={handleBerufsbildnerLogin} disabled={loading || !email}>
+                  {loading ? 'Senden...' : '📧 Anmelde-Link senden'}
+                </Button>
+                <p className="text-stone-500 text-sm text-center">
+                  Du erhältst einen Link per E-Mail – kein Passwort nötig!
+                </p>
+              </>
+            )}
+            
+            {mode === 'admin' && (
+              <>
+                <Input 
+                  label="E-Mail" 
+                  type="email"
+                  value={email} 
+                  onChange={(e) => setEmail(e.target.value)} 
+                />
+                <Input 
+                  label="Passwort" 
+                  type="password" 
+                  value={password} 
+                  onChange={(e) => setPassword(e.target.value)} 
+                />
+                {error && <p className="text-red-400 text-sm">{error}</p>}
+                <Button variant="primary" size="large" className="w-full" onClick={handleAdminLogin} disabled={loading}>
+                  {loading ? 'Laden...' : 'Einloggen'}
+                </Button>
+              </>
+            )}
           </div>
         )}
       </Card>
@@ -1110,25 +1257,26 @@ const BerufsbildnerBereich = ({ berufsbildner, lernende, rapporte, onLogout, onR
 // ADMIN BEREICH
 // ============================================================================
 
-const AdminBereich = ({ admins, berufsbildner, lernende, rapporte, onLogout, onRefresh }) => {
+const AdminBereich = ({ berufsbildner, lernende, rapporte, onLogout, onRefresh }) => {
   const [newBBName, setNewBBName] = useState('');
-  const [newBBUsername, setNewBBUsername] = useState('');
-  const [newBBPassword, setNewBBPassword] = useState('');
+  const [newBBEmail, setNewBBEmail] = useState('');
   const [newBBFirma, setNewBBFirma] = useState('');
   const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState('');
   
   const createBerufsbildner = async () => {
-    if (!newBBName || !newBBUsername || !newBBPassword) return;
+    if (!newBBName || !newBBEmail) return;
     setSaving(true);
+    setSuccess('');
     try {
       await addDoc(collection(db, 'berufsbildner'), {
         name: newBBName,
-        username: newBBUsername,
-        password: newBBPassword,
+        email: newBBEmail.toLowerCase(),
         firma: newBBFirma,
         codes: []
       });
-      setNewBBName(''); setNewBBUsername(''); setNewBBPassword(''); setNewBBFirma('');
+      setSuccess(`✅ Berufsbildner "${newBBName}" erstellt! Er kann sich jetzt mit ${newBBEmail} anmelden.`);
+      setNewBBName(''); setNewBBEmail(''); setNewBBFirma('');
       onRefresh?.();
     } catch (err) {
       console.error(err);
@@ -1165,13 +1313,20 @@ const AdminBereich = ({ admins, berufsbildner, lernende, rapporte, onLogout, onR
           <h2 className="text-lg font-semibold text-stone-100 mb-4">Neuen Berufsbildner erstellen</h2>
           <div className="grid md:grid-cols-2 gap-4">
             <Input label="Name" value={newBBName} onChange={(e) => setNewBBName(e.target.value)} placeholder="Hans Meier" />
-            <Input label="Firma" value={newBBFirma} onChange={(e) => setNewBBFirma(e.target.value)} placeholder="Bau AG" />
-            <Input label="Benutzername" value={newBBUsername} onChange={(e) => setNewBBUsername(e.target.value)} placeholder="meier" />
-            <Input label="Passwort" value={newBBPassword} onChange={(e) => setNewBBPassword(e.target.value)} placeholder="••••••••" />
+            <Input label="E-Mail" type="email" value={newBBEmail} onChange={(e) => setNewBBEmail(e.target.value)} placeholder="hans.meier@firma.ch" />
+            <Input label="Firma" value={newBBFirma} onChange={(e) => setNewBBFirma(e.target.value)} placeholder="Bau AG" className="md:col-span-2" />
           </div>
-          <Button variant="primary" className="mt-4" onClick={createBerufsbildner} disabled={!newBBName || !newBBUsername || !newBBPassword || saving}>
+          {success && (
+            <div className="mt-4 p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl">
+              <p className="text-emerald-400 text-sm">{success}</p>
+            </div>
+          )}
+          <Button variant="primary" className="mt-4" onClick={createBerufsbildner} disabled={!newBBName || !newBBEmail || saving}>
             {saving ? 'Erstellen...' : 'Berufsbildner erstellen'}
           </Button>
+          <p className="text-stone-500 text-sm mt-2">
+            Der Berufsbildner erhält einen Anmelde-Link per E-Mail (kein Passwort nötig)
+          </p>
         </Card>
         <Card>
           <h2 className="text-lg font-semibold text-stone-100 mb-4">Berufsbildner ({berufsbildner.length})</h2>
@@ -1182,7 +1337,7 @@ const AdminBereich = ({ admins, berufsbildner, lernende, rapporte, onLogout, onR
                 <div key={bb.id} className="flex items-center justify-between p-4 bg-stone-700/30 rounded-xl">
                   <div>
                     <p className="text-stone-100 font-medium">{bb.name}</p>
-                    <p className="text-stone-400 text-sm">{bb.firma || 'Keine Firma'} • {bb.username}</p>
+                    <p className="text-stone-400 text-sm">{bb.firma || 'Keine Firma'} • {bb.email}</p>
                     <p className="text-stone-500 text-sm">{lernendeAnzahl} Lernende • {(bb.codes || []).length} Codes</p>
                   </div>
                   <Button variant="danger" size="small" onClick={() => deleteBerufsbildner(bb.id)} disabled={lernendeAnzahl > 0}>Löschen</Button>
@@ -1234,7 +1389,14 @@ export default function App() {
   
   useEffect(() => { loadData(); }, []);
   
-  const handleLogout = () => setSession(null);
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch (err) {
+      console.error(err);
+    }
+    setSession(null);
+  };
   
   if (loading) {
     return (
