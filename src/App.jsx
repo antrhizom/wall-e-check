@@ -442,29 +442,75 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
 
 const LernendenDashboard = ({ lernender, rapporte, berufsbildner, monatsBewertungen }) => {
   const [selectedMonth, setSelectedMonth] = useState('all');
+  const [showAllKategorien, setShowAllKategorien] = useState(false);
+  const [showAllKompetenzen, setShowAllKompetenzen] = useState(false);
+  
   const meineRapporte = rapporte.filter(r => r.lernenderId === lernender.id);
   const meineBewertungen = monatsBewertungen.filter(b => b.lernenderId === lernender.id);
   const gefilterteRapporte = selectedMonth === 'all' ? meineRapporte : meineRapporte.filter(r => getMonthKey(r.datum) === selectedMonth);
   const availableMonths = [...new Set(meineRapporte.map(r => getMonthKey(r.datum)))].sort().reverse();
   
+  // Arbeits-Statistik
   const arbeitsStats = {};
   gefilterteRapporte.forEach(rapport => {
     rapport.arbeiten?.forEach(a => {
-      if (!arbeitsStats[a.kategorie]) arbeitsStats[a.kategorie] = { count: 0, totalSelbst: 0, totalBB: 0, bbCount: 0 };
+      if (!arbeitsStats[a.kategorie]) arbeitsStats[a.kategorie] = { count: 0, totalSelbst: 0, totalBB: 0, bbCount: 0, verbesserungen: 0 };
       arbeitsStats[a.kategorie].count++;
       arbeitsStats[a.kategorie].totalSelbst += a.bewertung || 0;
+      if (a.verbessert) arbeitsStats[a.kategorie].verbesserungen++;
       const bbBewertung = rapport.berufsbildnerBewertungen?.find(b => b.arbeit === a.arbeit);
       if (bbBewertung) { arbeitsStats[a.kategorie].totalBB += bbBewertung.bewertung; arbeitsStats[a.kategorie].bbCount++; }
+    });
+  });
+  
+  // Kompetenz-Statistik
+  const kompetenzStats = {};
+  gefilterteRapporte.forEach(rapport => {
+    rapport.kompetenzen?.forEach(k => {
+      kompetenzStats[k] = (kompetenzStats[k] || 0) + 1;
     });
   });
   
   const kategorieStats = Object.entries(arbeitsStats).map(([kat, stats]) => ({
     kategorie: kat, name: ARBEITSKATEGORIEN[kat]?.name || kat, icon: ARBEITSKATEGORIEN[kat]?.icon || '📋',
     avgSelbst: stats.count > 0 ? stats.totalSelbst / stats.count : 0,
-    avgBB: stats.bbCount > 0 ? stats.totalBB / stats.bbCount : null, count: stats.count
+    avgBB: stats.bbCount > 0 ? stats.totalBB / stats.bbCount : null, 
+    count: stats.count,
+    verbesserungen: stats.verbesserungen
   })).sort((a, b) => b.count - a.count);
   
+  const kompetenzList = Object.entries(kompetenzStats).map(([id, count]) => {
+    const komp = KOMPETENZEN.find(k => k.id === id);
+    return { id, name: komp?.name || id, icon: komp?.icon || '📋', count };
+  }).sort((a, b) => b.count - a.count);
+  
+  // Zeitlicher Verlauf pro Monat
+  const monthlyData = {};
+  meineRapporte.forEach(rapport => {
+    const month = getMonthKey(rapport.datum);
+    if (!monthlyData[month]) monthlyData[month] = { rapporte: 0, arbeiten: 0, avgBewertung: [], kompetenzen: new Set() };
+    monthlyData[month].rapporte++;
+    rapport.arbeiten?.forEach(a => {
+      monthlyData[month].arbeiten++;
+      monthlyData[month].avgBewertung.push(a.bewertung || 0);
+    });
+    rapport.kompetenzen?.forEach(k => monthlyData[month].kompetenzen.add(k));
+  });
+  
+  const zeitVerlauf = Object.entries(monthlyData)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-6)
+    .map(([month, data]) => ({
+      month,
+      label: formatMonth(month + '-01').split(' ')[0].substring(0, 3),
+      rapporte: data.rapporte,
+      arbeiten: data.arbeiten,
+      avgBewertung: data.avgBewertung.length > 0 ? data.avgBewertung.reduce((a, b) => a + b, 0) / data.avgBewertung.length : 0,
+      kompetenzen: data.kompetenzen.size
+    }));
+  
   const letzteBewertung = meineBewertungen.sort((a, b) => b.monat?.localeCompare(a.monat))[0];
+  const maxArbeiten = Math.max(...zeitVerlauf.map(z => z.arbeiten), 1);
   
   return (
     <div className="max-w-6xl mx-auto p-4 space-y-6">
@@ -473,6 +519,7 @@ const LernendenDashboard = ({ lernender, rapporte, berufsbildner, monatsBewertun
         <Select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} options={[{ value: 'all', label: 'Alle Monate' }, ...availableMonths.map(m => ({ value: m, label: formatMonth(m + '-01') }))]} />
       </div>
       
+      {/* Statistik-Karten */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card><p className="text-stone-400 text-sm">Rapporte</p><p className="text-3xl font-bold text-stone-100 mt-1">{meineRapporte.length}</p></Card>
         <Card><p className="text-stone-400 text-sm">Diese Woche</p><p className="text-3xl font-bold text-amber-400 mt-1">{meineRapporte.filter(r => (new Date() - new Date(r.datum)) / 86400000 <= 7).length}</p></Card>
@@ -480,6 +527,7 @@ const LernendenDashboard = ({ lernender, rapporte, berufsbildner, monatsBewertun
         <Card><p className="text-stone-400 text-sm">Verbesserungen</p><p className="text-3xl font-bold text-blue-400 mt-1">{gefilterteRapporte.flatMap(r => r.arbeiten || []).filter(a => a.verbessert).length}</p></Card>
       </div>
       
+      {/* Monatsbewertung */}
       {letzteBewertung && (
         <Card className="border-blue-500/30 bg-blue-500/5">
           <h2 className="text-lg font-semibold text-blue-400 mb-2">📋 Monatsbewertung {formatMonth(letzteBewertung.monat + '-01')}</h2>
@@ -489,32 +537,105 @@ const LernendenDashboard = ({ lernender, rapporte, berufsbildner, monatsBewertun
         </Card>
       )}
       
-      <div className="grid md:grid-cols-2 gap-6">
+      {/* Zeitlicher Verlauf - Grafik */}
+      {zeitVerlauf.length > 1 && (
         <Card>
-          <h2 className="text-lg font-semibold text-stone-100 mb-4">🏗️ Arbeiten nach Bereich</h2>
-          <div className="space-y-4">
-            {kategorieStats.slice(0, 6).map(kat => (
-              <div key={kat.kategorie}>
-                <div className="flex items-center justify-between mb-1"><span className="text-stone-300 text-sm">{kat.icon} {kat.name}</span><span className="text-stone-400 text-sm">{kat.count}×</span></div>
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2"><span className="text-xs text-stone-500 w-10">Selbst</span><div className="flex-1"><ProgressBar value={kat.avgSelbst} color="amber" /></div><span className="text-xs text-stone-400 w-6">{kat.avgSelbst.toFixed(1)}</span></div>
-                  {kat.avgBB !== null && <div className="flex items-center gap-2"><span className="text-xs text-stone-500 w-10">BB</span><div className="flex-1"><ProgressBar value={kat.avgBB} color="blue" /></div><span className="text-xs text-stone-400 w-6">{kat.avgBB.toFixed(1)}</span></div>}
+          <h2 className="text-lg font-semibold text-stone-100 mb-4">📈 Entwicklung über Zeit</h2>
+          <div className="mb-4 flex gap-4 text-xs">
+            <span className="flex items-center gap-1"><span className="w-3 h-3 bg-amber-500 rounded"></span> Arbeiten</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 bg-emerald-500 rounded"></span> Ø Bewertung</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 bg-blue-500 rounded"></span> Kompetenzen</span>
+          </div>
+          <div className="h-48 flex items-end gap-3">
+            {zeitVerlauf.map((item, i) => (
+              <div key={i} className="flex-1 flex flex-col items-center">
+                <div className="w-full flex gap-1 items-end justify-center h-36">
+                  <div className="w-4 bg-amber-500/80 rounded-t transition-all" style={{ height: `${(item.arbeiten / maxArbeiten) * 100}%` }} title={`${item.arbeiten} Arbeiten`} />
+                  <div className="w-4 bg-emerald-500/80 rounded-t transition-all" style={{ height: `${(item.avgBewertung / 5) * 100}%` }} title={`Ø ${item.avgBewertung.toFixed(1)}`} />
+                  <div className="w-4 bg-blue-500/80 rounded-t transition-all" style={{ height: `${(item.kompetenzen / 10) * 100}%` }} title={`${item.kompetenzen} Kompetenzen`} />
                 </div>
+                <span className="text-xs text-stone-400 mt-2">{item.label}</span>
+                <span className="text-xs text-stone-500">{item.rapporte}R</span>
               </div>
             ))}
           </div>
         </Card>
-        
-        {berufsbildner && (
-          <Card>
-            <h2 className="text-lg font-semibold text-stone-100 mb-4">👨‍🏫 Dein/e Berufsbildner/in</h2>
-            <div className="flex items-center gap-4">
-              <div className="w-16 h-16 bg-stone-700 rounded-full flex items-center justify-center text-2xl">👷</div>
-              <div><p className="text-stone-100 font-medium">{berufsbildner.name}</p><p className="text-stone-400">{berufsbildner.firma}</p></div>
+      )}
+      
+      {/* Alle Arbeitskategorien */}
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-stone-100">🏗️ Alle Arbeitskategorien</h2>
+          <button onClick={() => setShowAllKategorien(!showAllKategorien)} className="text-amber-400 text-sm hover:text-amber-300">
+            {showAllKategorien ? '← Weniger' : 'Alle anzeigen →'}
+          </button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {(showAllKategorien ? kategorieStats : kategorieStats.slice(0, 6)).map(kat => (
+            <div key={kat.kategorie} className="p-3 bg-stone-700/20 rounded-xl">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-stone-200 text-sm font-medium">{kat.icon} {kat.name}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-amber-400 text-xs">{kat.count}× geübt</span>
+                  {kat.verbesserungen > 0 && <span className="text-emerald-400 text-xs">📈 {kat.verbesserungen}</span>}
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-stone-500 w-16">Selbst:</span>
+                  <div className="flex-1"><ProgressBar value={kat.avgSelbst} color="amber" /></div>
+                  <span className="text-xs text-amber-400 w-8">{kat.avgSelbst.toFixed(1)}</span>
+                </div>
+                {kat.avgBB !== null && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-stone-500 w-16">BB:</span>
+                    <div className="flex-1"><ProgressBar value={kat.avgBB} color="blue" /></div>
+                    <span className="text-xs text-blue-400 w-8">{kat.avgBB.toFixed(1)}</span>
+                  </div>
+                )}
+              </div>
             </div>
-          </Card>
-        )}
-      </div>
+          ))}
+        </div>
+        {kategorieStats.length === 0 && <p className="text-stone-500 text-center py-4">Noch keine Arbeiten erfasst.</p>}
+      </Card>
+      
+      {/* Alle Kompetenzen */}
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-stone-100">💪 Alle Kompetenzen</h2>
+          <button onClick={() => setShowAllKompetenzen(!showAllKompetenzen)} className="text-amber-400 text-sm hover:text-amber-300">
+            {showAllKompetenzen ? '← Weniger' : 'Alle anzeigen →'}
+          </button>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          {KOMPETENZEN.map(komp => {
+            const count = kompetenzStats[komp.id] || 0;
+            const maxCount = Math.max(...Object.values(kompetenzStats), 1);
+            return (
+              <div key={komp.id} className={`p-3 rounded-xl text-center transition-all ${count > 0 ? 'bg-stone-700/30' : 'bg-stone-800/30 opacity-50'}`}>
+                <span className="text-2xl">{komp.icon}</span>
+                <p className="text-xs text-stone-300 mt-1">{komp.name}</p>
+                <div className="mt-2 h-1 bg-stone-700 rounded-full overflow-hidden">
+                  <div className="h-full bg-amber-500 transition-all" style={{ width: `${(count / maxCount) * 100}%` }} />
+                </div>
+                <p className="text-xs text-amber-400 mt-1">{count}×</p>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+      
+      {/* Berufsbildner/in */}
+      {berufsbildner && (
+        <Card>
+          <h2 className="text-lg font-semibold text-stone-100 mb-4">👨‍🏫 Dein/e Berufsbildner/in</h2>
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 bg-stone-700 rounded-full flex items-center justify-center text-2xl">👷</div>
+            <div><p className="text-stone-100 font-medium">{berufsbildner.name}</p><p className="text-stone-400">{berufsbildner.firma}</p></div>
+          </div>
+        </Card>
+      )}
     </div>
   );
 };
