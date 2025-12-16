@@ -442,9 +442,6 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
           </div>
         </Card>
       )}
-          </div>
-        </Card>
-      )}
       
       {selectedArbeiten.length > 0 && (
         <Card>
