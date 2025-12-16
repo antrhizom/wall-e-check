@@ -3,9 +3,7 @@ import { db, auth } from './firebase';
 import { collection, doc, getDocs, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
 import { 
   signInWithEmailAndPassword, 
-  sendSignInLinkToEmail, 
-  isSignInWithEmailLink, 
-  signInWithEmailLink,
+  createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged
 } from 'firebase/auth';
@@ -56,7 +54,6 @@ const formatDate = (date) => new Date(date).toLocaleDateString('de-CH', { weekda
 const formatDateShort = (date) => new Date(date).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const formatMonth = (date) => new Date(date).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' });
 const getMonthKey = (date) => { const d = new Date(date); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
-const actionCodeSettings = { url: window.location.origin, handleCodeInApp: true };
 
 // ============================================================================
 // UI KOMPONENTEN
@@ -156,29 +153,7 @@ const LoginScreen = ({ onLogin }) => {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
-  
-  useEffect(() => {
-    if (isSignInWithEmailLink(auth, window.location.href)) {
-      let emailForSignIn = window.localStorage.getItem('emailForSignIn');
-      if (!emailForSignIn) emailForSignIn = window.prompt('Bitte gib deine E-Mail-Adresse zur Bestätigung ein:');
-      if (emailForSignIn) {
-        setLoading(true);
-        signInWithEmailLink(auth, emailForSignIn, window.location.href)
-          .then(async () => {
-            window.localStorage.removeItem('emailForSignIn');
-            const snapshot = await getDocs(query(collection(db, 'berufsbildner'), where('email', '==', emailForSignIn.toLowerCase())));
-            if (!snapshot.empty) {
-              const bb = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
-              onLogin({ type: 'berufsbildner', user: bb });
-            }
-            window.history.replaceState(null, '', window.location.pathname);
-          })
-          .catch((err) => { console.error(err); setError('Anmeldung fehlgeschlagen.'); setLoading(false); });
-      }
-    }
-  }, []);
   
   const handleAdminLogin = async () => {
     setError(''); setLoading(true);
@@ -192,14 +167,30 @@ const LoginScreen = ({ onLogin }) => {
   };
   
   const handleBerufsbildnerLogin = async () => {
-    setError(''); setSuccess(''); setLoading(true);
+    setError(''); setLoading(true);
     try {
+      // Prüfe ob BB in Firestore existiert
       const snapshot = await getDocs(query(collection(db, 'berufsbildner'), where('email', '==', email.toLowerCase())));
-      if (snapshot.empty) { setError('Kein Berufsbildner/in-Account mit dieser E-Mail gefunden'); setLoading(false); return; }
-      await sendSignInLinkToEmail(auth, email, actionCodeSettings);
-      window.localStorage.setItem('emailForSignIn', email.toLowerCase());
-      setSuccess('✉️ Ein Anmelde-Link wurde an deine E-Mail gesendet!');
-    } catch { setError('Fehler beim Senden des Links.'); }
+      if (snapshot.empty) { 
+        setError('Kein Berufsbildner/in-Account mit dieser E-Mail gefunden'); 
+        setLoading(false); 
+        return; 
+      }
+      
+      // Firebase Auth Login
+      await signInWithEmailAndPassword(auth, email, password);
+      const bb = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() };
+      onLogin({ type: 'berufsbildner', user: bb });
+    } catch (err) { 
+      console.error(err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        setError('Falsches Passwort');
+      } else if (err.code === 'auth/user-not-found') {
+        setError('Account nicht gefunden. Bitte Admin kontaktieren.');
+      } else {
+        setError('Anmeldung fehlgeschlagen');
+      }
+    }
     finally { setLoading(false); }
   };
   
@@ -223,10 +214,6 @@ const LoginScreen = ({ onLogin }) => {
     finally { setLoading(false); }
   };
   
-  if (loading && isSignInWithEmailLink(auth, window.location.href)) {
-    return <div className="min-h-screen bg-gradient-to-br from-stone-900 via-stone-800 to-stone-900 flex items-center justify-center p-4"><Card className="w-full max-w-md text-center"><LoadingSpinner /><p className="text-stone-300 mt-4">Anmeldung wird abgeschlossen...</p></Card></div>;
-  }
-  
   return (
     <div className="min-h-screen bg-gradient-to-br from-stone-900 via-stone-800 to-stone-900 flex items-center justify-center p-4">
       <div className="absolute inset-0 overflow-hidden">
@@ -247,7 +234,7 @@ const LoginScreen = ({ onLogin }) => {
           </div>
         ) : (
           <div className="space-y-4">
-            <button onClick={() => { setMode('select'); setError(''); setSuccess(''); }} className="text-amber-500 hover:text-amber-400 flex items-center gap-2 mb-4">← Zurück</button>
+            <button onClick={() => { setMode('select'); setError(''); }} className="text-amber-500 hover:text-amber-400 flex items-center gap-2 mb-4">← Zurück</button>
             {mode === 'lernend' && (
               <>
                 <Input label="Zugangscode von Berufsbildner/in" placeholder="z.B. ABC123" value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} />
@@ -260,10 +247,10 @@ const LoginScreen = ({ onLogin }) => {
             {mode === 'berufsbildner' && (
               <>
                 <Input label="E-Mail-Adresse" type="email" placeholder="name@firma.ch" value={email} onChange={(e) => setEmail(e.target.value)} />
+                <Input label="Passwort" type="password" placeholder="••••••••" value={password} onChange={(e) => setPassword(e.target.value)} />
                 {error && <p className="text-red-400 text-sm">{error}</p>}
-                {success && <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl"><p className="text-emerald-400 text-sm">{success}</p></div>}
-                <Button variant="primary" size="large" className="w-full" onClick={handleBerufsbildnerLogin} disabled={loading || !email}>{loading ? 'Senden...' : '📧 Anmelde-Link senden'}</Button>
-                <p className="text-stone-500 text-sm text-center">Du erhältst einen Link per E-Mail – kein Passwort nötig!</p>
+                <Button variant="primary" size="large" className="w-full" onClick={handleBerufsbildnerLogin} disabled={loading || !email || !password}>{loading ? 'Laden...' : 'Einloggen'}</Button>
+                <p className="text-stone-500 text-sm text-center">Passwort vom Admin erhalten</p>
               </>
             )}
             {mode === 'admin' && (
@@ -308,6 +295,7 @@ const LernendenNav = ({ currentView, onNavigate, onLogout, userName }) => (
 );
 
 const RapportForm = ({ lernender, rapporte, onSave }) => {
+  const [selectedDatum, setSelectedDatum] = useState(new Date().toISOString().split('T')[0]);
   const [selectedKategorie, setSelectedKategorie] = useState(null);
   const [selectedArbeiten, setSelectedArbeiten] = useState([]);
   const [selectedKompetenzen, setSelectedKompetenzen] = useState([]);
@@ -316,15 +304,29 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
   const [saving, setSaving] = useState(false);
   
   const heute = new Date().toISOString().split('T')[0];
-  const heutigerRapport = rapporte.find(r => r.lernenderId === lernender.id && r.datum === heute);
+  const vorhandenRapport = rapporte.find(r => r.lernenderId === lernender.id && r.datum === selectedDatum);
   
+  // Lade existierenden Rapport wenn Datum wechselt
   useEffect(() => {
-    if (heutigerRapport) {
-      setSelectedArbeiten(heutigerRapport.arbeiten || []);
-      setSelectedKompetenzen(heutigerRapport.kompetenzen || []);
-      setNotizen(heutigerRapport.notizen || '');
+    if (vorhandenRapport) {
+      setSelectedArbeiten(vorhandenRapport.arbeiten || []);
+      setSelectedKompetenzen(vorhandenRapport.kompetenzen || []);
+      setNotizen(vorhandenRapport.notizen || '');
+    } else {
+      setSelectedArbeiten([]);
+      setSelectedKompetenzen([]);
+      setNotizen('');
     }
-  }, [heutigerRapport]);
+    setSelectedKategorie(null);
+  }, [selectedDatum, vorhandenRapport?.id]);
+  
+  // Datum-Navigation
+  const changeDate = (days) => {
+    const d = new Date(selectedDatum);
+    d.setDate(d.getDate() + days);
+    const newDate = d.toISOString().split('T')[0];
+    if (newDate <= heute) setSelectedDatum(newDate);
+  };
   
   const toggleArbeit = (kategorie, arbeit) => {
     const exists = selectedArbeiten.find(a => a.kategorie === kategorie && a.arbeit === arbeit);
@@ -344,8 +346,8 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
   const saveRapport = async () => {
     setSaving(true);
     try {
-      const rapportData = { lernenderId: lernender.id, datum: heute, arbeiten: selectedArbeiten, kompetenzen: selectedKompetenzen, notizen, berufsbildnerBewertungen: heutigerRapport?.berufsbildnerBewertungen || [], kommentare: heutigerRapport?.kommentare || [] };
-      if (heutigerRapport) await updateDoc(doc(db, 'rapporte', heutigerRapport.id), rapportData);
+      const rapportData = { lernenderId: lernender.id, datum: selectedDatum, arbeiten: selectedArbeiten, kompetenzen: selectedKompetenzen, notizen, berufsbildnerBewertungen: vorhandenRapport?.berufsbildnerBewertungen || [], kommentare: vorhandenRapport?.kommentare || [] };
+      if (vorhandenRapport) await updateDoc(doc(db, 'rapporte', vorhandenRapport.id), rapportData);
       else await addDoc(collection(db, 'rapporte'), rapportData);
       setSaved(true); setTimeout(() => setSaved(false), 2000);
       onSave?.();
@@ -353,12 +355,51 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
     finally { setSaving(false); }
   };
   
+  const isToday = selectedDatum === heute;
+  
   return (
     <div className="max-w-4xl mx-auto p-4 space-y-6">
+      {/* Datum-Auswahl */}
       <div className="flex items-center justify-between">
-        <div><h1 className="text-2xl font-bold text-stone-100">Tagesrapport</h1><p className="text-stone-400">{formatDate(heute)}</p></div>
-        {heutigerRapport && <span className="bg-emerald-500/20 text-emerald-400 px-3 py-1 rounded-full text-sm">✓ Gespeichert</span>}
+        <div>
+          <h1 className="text-2xl font-bold text-stone-100">Tagesrapport</h1>
+          <p className="text-stone-400">{formatDate(selectedDatum)}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {vorhandenRapport && <span className="bg-emerald-500/20 text-emerald-400 px-3 py-1 rounded-full text-sm">✓ Gespeichert</span>}
+          {!isToday && <span className="bg-amber-500/20 text-amber-400 px-3 py-1 rounded-full text-sm">📅 Nachtrag</span>}
+        </div>
       </div>
+      
+      {/* Datum-Navigation */}
+      <Card>
+        <div className="flex items-center justify-between">
+          <button onClick={() => changeDate(-1)} className="p-2 rounded-lg bg-stone-700/50 hover:bg-stone-700 text-stone-300 transition-all">
+            ← Vorheriger Tag
+          </button>
+          <div className="flex items-center gap-3">
+            <input 
+              type="date" 
+              value={selectedDatum} 
+              max={heute}
+              onChange={(e) => setSelectedDatum(e.target.value)}
+              className="bg-stone-700/50 border border-stone-600 rounded-lg px-3 py-2 text-stone-100 focus:border-amber-500 focus:outline-none"
+            />
+            {!isToday && (
+              <button onClick={() => setSelectedDatum(heute)} className="px-3 py-2 rounded-lg bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 text-sm">
+                Heute
+              </button>
+            )}
+          </div>
+          <button 
+            onClick={() => changeDate(1)} 
+            disabled={isToday}
+            className={`p-2 rounded-lg transition-all ${isToday ? 'bg-stone-800 text-stone-600 cursor-not-allowed' : 'bg-stone-700/50 hover:bg-stone-700 text-stone-300'}`}
+          >
+            Nächster Tag →
+          </button>
+        </div>
+      </Card>
       
       <Card>
         <h2 className="text-lg font-semibold text-stone-100 mb-4">Arbeitskategorie wählen</h2>
@@ -398,6 +439,9 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
                 </div>
               );
             })}
+          </div>
+        </Card>
+      )}
           </div>
         </Card>
       )}
@@ -970,20 +1014,57 @@ const BerufsbildnerBereich = ({ berufsbildner, lernende, rapporte, monatsBewertu
 const AdminBereich = ({ berufsbildner, lernende, rapporte, onLogout, onRefresh }) => {
   const [newBBName, setNewBBName] = useState('');
   const [newBBEmail, setNewBBEmail] = useState('');
+  const [newBBPassword, setNewBBPassword] = useState('');
   const [newBBFirma, setNewBBFirma] = useState('');
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState('');
+  const [error, setError] = useState('');
   const [deleting, setDeleting] = useState(null);
   
+  const generatePassword = () => {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+    let pw = '';
+    for (let i = 0; i < 10; i++) pw += chars.charAt(Math.floor(Math.random() * chars.length));
+    setNewBBPassword(pw);
+  };
+  
   const createBerufsbildner = async () => {
-    if (!newBBName || !newBBEmail) return;
-    setSaving(true); setSuccess('');
+    if (!newBBName || !newBBEmail || !newBBPassword) return;
+    if (newBBPassword.length < 6) { setError('Passwort muss mindestens 6 Zeichen haben'); return; }
+    
+    setSaving(true); setSuccess(''); setError('');
     try {
-      await addDoc(collection(db, 'berufsbildner'), { name: newBBName, email: newBBEmail.toLowerCase(), firma: newBBFirma, codes: [] });
-      setSuccess(`✅ "${newBBName}" erstellt!`);
-      setNewBBName(''); setNewBBEmail(''); setNewBBFirma('');
+      // 1. Firebase Auth Account erstellen
+      await createUserWithEmailAndPassword(auth, newBBEmail, newBBPassword);
+      
+      // 2. Firestore Eintrag erstellen
+      await addDoc(collection(db, 'berufsbildner'), { 
+        name: newBBName, 
+        email: newBBEmail.toLowerCase(), 
+        firma: newBBFirma, 
+        codes: [] 
+      });
+      
+      setSuccess(`✅ "${newBBName}" erstellt!\n\n📧 E-Mail: ${newBBEmail}\n🔑 Passwort: ${newBBPassword}\n\nBitte diese Daten der Person mitteilen!`);
+      setNewBBName(''); setNewBBEmail(''); setNewBBPassword(''); setNewBBFirma('');
       onRefresh?.();
-    } catch (err) { console.error(err); }
+      
+      // Ausloggen damit Admin eingeloggt bleibt (createUser loggt automatisch ein)
+      // Wir machen das nicht, stattdessen muss Admin sich danach neu einloggen
+      // Das ist ein bekanntes Firebase-Verhalten
+      
+    } catch (err) { 
+      console.error(err); 
+      if (err.code === 'auth/email-already-in-use') {
+        setError('Diese E-Mail-Adresse ist bereits registriert');
+      } else if (err.code === 'auth/weak-password') {
+        setError('Passwort ist zu schwach (mind. 6 Zeichen)');
+      } else if (err.code === 'auth/invalid-email') {
+        setError('Ungültige E-Mail-Adresse');
+      } else {
+        setError('Fehler beim Erstellen: ' + err.message);
+      }
+    }
     finally { setSaving(false); }
   };
   
@@ -1014,10 +1095,31 @@ const AdminBereich = ({ berufsbildner, lernende, rapporte, onLogout, onRefresh }
           <div className="grid md:grid-cols-2 gap-4">
             <Input label="Name" value={newBBName} onChange={(e) => setNewBBName(e.target.value)} placeholder="Anna Müller" />
             <Input label="E-Mail" type="email" value={newBBEmail} onChange={(e) => setNewBBEmail(e.target.value)} placeholder="anna@firma.ch" />
-            <Input label="Firma" value={newBBFirma} onChange={(e) => setNewBBFirma(e.target.value)} placeholder="Bau AG" className="md:col-span-2" />
+            <div className="space-y-2">
+              <label className="text-sm text-stone-400">Passwort</label>
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  value={newBBPassword} 
+                  onChange={(e) => setNewBBPassword(e.target.value)} 
+                  placeholder="Mind. 6 Zeichen"
+                  className="flex-1 bg-stone-800/50 border border-stone-600 rounded-xl px-4 py-3 text-stone-100 focus:border-amber-500 focus:outline-none"
+                />
+                <button 
+                  onClick={generatePassword}
+                  className="px-4 py-3 bg-stone-700 hover:bg-stone-600 text-stone-300 rounded-xl transition-all"
+                  title="Zufälliges Passwort generieren"
+                >
+                  🎲
+                </button>
+              </div>
+            </div>
+            <Input label="Firma" value={newBBFirma} onChange={(e) => setNewBBFirma(e.target.value)} placeholder="Bau AG" />
           </div>
-          {success && <div className="mt-4 p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl"><p className="text-emerald-400 text-sm">{success}</p></div>}
-          <Button variant="primary" className="mt-4" onClick={createBerufsbildner} disabled={!newBBName || !newBBEmail || saving}>{saving ? '...' : 'Erstellen'}</Button>
+          {error && <div className="mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl"><p className="text-red-400 text-sm">{error}</p></div>}
+          {success && <div className="mt-4 p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-xl"><p className="text-emerald-400 text-sm whitespace-pre-line">{success}</p></div>}
+          <Button variant="primary" className="mt-4" onClick={createBerufsbildner} disabled={!newBBName || !newBBEmail || !newBBPassword || saving}>{saving ? '...' : 'Erstellen'}</Button>
+          <p className="text-stone-500 text-sm mt-2">⚠️ Notiere das Passwort – es kann nicht wiederhergestellt werden!</p>
         </Card>
         <Card>
           <h2 className="text-lg font-semibold text-stone-100 mb-4">Berufsbildner/innen ({berufsbildner.length})</h2>
