@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth } from './firebase';
-import { collection, doc, getDocs, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc, query, where } from 'firebase/firestore';
 import { 
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword,
@@ -54,6 +54,8 @@ const formatDate = (date) => new Date(date).toLocaleDateString('de-CH', { weekda
 const formatDateShort = (date) => new Date(date).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
 const formatMonth = (date) => new Date(date).toLocaleDateString('de-CH', { month: 'long', year: 'numeric' });
 const getMonthKey = (date) => { const d = new Date(date); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; };
+// Generiert strukturierte Email für Lernende (Code wird Document ID)
+const getLernendEmail = (code) => `lernend-${code.toLowerCase()}@maurercheck.local`;
 
 // ============================================================================
 // UI KOMPONENTEN
@@ -927,21 +929,83 @@ const LoginScreen = ({ onLogin }) => {
   };
   
   const handleLernendLogin = async () => {
-    setError(''); setLoading(true);
+    setError(''); 
+    setLoading(true);
+    
     try {
-      const bbSnapshot = await getDocs(collection(db, 'berufsbildner'));
-      let foundBB = null;
-      bbSnapshot.forEach(doc => { const data = doc.data(); if (data.codes?.includes(code.toUpperCase())) foundBB = { id: doc.id, ...data }; });
-      if (foundBB) {
-        const lernSnapshot = await getDocs(query(collection(db, 'lernende'), where('code', '==', code.toUpperCase())));
-        if (!lernSnapshot.empty) {
-          onLogin({ type: 'lernend', user: { id: lernSnapshot.docs[0].id, ...lernSnapshot.docs[0].data() } });
-        } else {
-          setError('Dieser Code wurde noch nicht aktiviert. Bitte wende dich an deine/n Berufsbildner/in.');
+      const codeUpper = code.toUpperCase();
+      
+      // 1. Direkter Zugriff auf Lernenden-Dokument (Code = Document ID)
+      const lernendDoc = await getDoc(doc(db, 'lernende', codeUpper));
+      
+      if (!lernendDoc.exists()) {
+        setError('Ungültiger Code oder noch nicht aktiviert.');
+        setLoading(false);
+        return;
+      }
+      
+      const lernendData = lernendDoc.data();
+      const lernendEmail = lernendData.email;
+      const lernendPassword = codeUpper; // Code = Passwort
+      
+      // 2. Prüfe ob Auth-Account bereits existiert
+      if (!lernendData.authCreated) {
+        // Erster Login - erstelle Auth-Account
+        try {
+          await createUserWithEmailAndPassword(auth, lernendEmail, lernendPassword);
+          console.log('✅ Auth-Account erstellt:', lernendEmail);
+          
+          // Markiere als erstellt
+          await updateDoc(doc(db, 'lernende', codeUpper), { 
+            authCreated: true 
+          });
+        } catch (authError) {
+          // Falls Account bereits existiert (sollte nicht passieren, aber sicher ist sicher)
+          if (authError.code === 'auth/email-already-in-use') {
+            console.log('Account existiert bereits, markiere als erstellt');
+            await updateDoc(doc(db, 'lernende', codeUpper), { 
+              authCreated: true 
+            });
+          } else {
+            console.error('Fehler beim Erstellen des Auth-Accounts:', authError);
+            setError('Fehler beim Erstellen des Accounts: ' + authError.message);
+            setLoading(false);
+            return;
+          }
         }
-      } else setError('Ungültiger Code');
-    } catch { setError('Verbindungsfehler.'); }
-    finally { setLoading(false); }
+      }
+      
+      // 3. Firebase Auth Login (jetzt existiert der Account sicher)
+      try {
+        await signInWithEmailAndPassword(auth, lernendEmail, lernendPassword);
+      } catch (loginError) {
+        console.error('Login-Fehler:', loginError);
+        if (loginError.code === 'auth/wrong-password' || loginError.code === 'auth/invalid-credential') {
+          setError('Falscher Code');
+        } else if (loginError.code === 'auth/user-not-found') {
+          setError('Account nicht gefunden. Bitte kontaktiere deine/n Berufsbildner/in.');
+        } else {
+          setError('Anmeldung fehlgeschlagen: ' + loginError.message);
+        }
+        setLoading(false);
+        return;
+      }
+      
+      // 4. Erfolgreicher Login - hole aktuelle Daten
+      const finalDoc = await getDoc(doc(db, 'lernende', codeUpper));
+      if (finalDoc.exists()) {
+        onLogin({ 
+          type: 'lernend', 
+          user: { id: codeUpper, ...finalDoc.data() } 
+        });
+      }
+      
+    } catch (err) {
+      console.error('Unerwarteter Fehler:', err);
+      setError('Verbindungsfehler. Bitte versuche es erneut.');
+    } finally {
+      setLoading(false);
+    }
   };
   
   return (
@@ -1075,7 +1139,16 @@ const RapportForm = ({ lernender, rapporte, onSave }) => {
   const saveRapport = async () => {
     setSaving(true);
     try {
-      const rapportData = { lernenderId: lernender.id, datum: selectedDatum, arbeiten: selectedArbeiten, kompetenzen: selectedKompetenzen, notizen, berufsbildnerBewertungen: vorhandenRapport?.berufsbildnerBewertungen || [], kommentare: vorhandenRapport?.kommentare || [] };
+      const rapportData = { 
+        lernenderId: lernender.id, // Das ist jetzt der Code!
+        lernenderCode: lernender.code, // Explizit auch den Code speichern
+        datum: selectedDatum, 
+        arbeiten: selectedArbeiten, 
+        kompetenzen: selectedKompetenzen, 
+        notizen, 
+        berufsbildnerBewertungen: vorhandenRapport?.berufsbildnerBewertungen || [], 
+        kommentare: vorhandenRapport?.kommentare || [] 
+      };
       if (vorhandenRapport) await updateDoc(doc(db, 'rapporte', vorhandenRapport.id), rapportData);
       else await addDoc(collection(db, 'rapporte'), rapportData);
       setSaved(true); setTimeout(() => setSaved(false), 2000);
@@ -1786,16 +1859,20 @@ const BerufsbildnerCodes = ({ berufsbildner, lernende, onRefresh }) => {
       const newLernender = {
         name: lernenderName.trim(),
         code: activatingCode,
+        email: getLernendEmail(activatingCode), // Email vormerken
+        authCreated: false, // Auth-Account noch nicht erstellt
         berufsbildnerId: berufsbildner.id,
         lehrjahr: parseInt(lehrjahr),
         startDatum: new Date().toISOString().split('T')[0]
       };
-      await addDoc(collection(db, 'lernende'), newLernender);
+      // Verwende setDoc mit Code als Document ID!
+      await setDoc(doc(db, 'lernende', activatingCode), newLernender);
       setActivatingCode(null);
       setLernenderName('');
       setLehrjahr(1);
+      alert(`Code ${activatingCode} aktiviert! Der/Die Lernende kann sich jetzt anmelden.`);
       onRefresh?.();
-    } catch (err) { console.error(err); alert('Fehler beim Aktivieren'); }
+    } catch (err) { console.error(err); alert('Fehler beim Aktivieren: ' + err.message); }
     finally { setSaving(false); }
   };
   
